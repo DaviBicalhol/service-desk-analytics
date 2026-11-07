@@ -1,6 +1,10 @@
 -- =====================================================================
 -- Service Desk Analytics | Etapa 3: análises em SQL
 -- Execute UMA consulta por vez (selecione o trecho e aperte F5)
+--
+-- ATENÇÃO: o SLA e os tempos de resolução são medidos em HORAS ÚTEIS
+-- (seg a sex, 8h às 18h) com a função horas_uteis(), criada em
+-- sql/03_funcoes.sql. Rode esse arquivo antes destas consultas.
 -- =====================================================================
 
 
@@ -19,13 +23,13 @@ ORDER BY total_chamados DESC;
 
 
 -- ---------------------------------------------------------------------
--- 2) Tempo médio de resolução por categoria (em horas)
---    Conceitos: AVG, EXTRACT(EPOCH ...), WHERE para filtrar só resolvidos
+-- 2) Tempo médio de resolução por categoria (em horas úteis)
+--    Conceitos: AVG, função própria horas_uteis(), WHERE para filtrar só resolvidos
 -- ---------------------------------------------------------------------
 SELECT
     ca.nome AS categoria,
     COUNT(*) AS chamados_resolvidos,
-    ROUND(AVG(EXTRACT(EPOCH FROM (c.resolvido_em - c.aberto_em)) / 3600)::numeric, 1)
+    ROUND(AVG(horas_uteis(c.aberto_em, c.resolvido_em)), 1)
         AS horas_medias_resolucao
 FROM chamados c
 JOIN categorias ca ON ca.id = c.categoria_id
@@ -35,16 +39,16 @@ ORDER BY horas_medias_resolucao DESC;
 
 
 -- ---------------------------------------------------------------------
--- 3) Cumprimento de SLA por prioridade
+-- 3) Cumprimento de SLA por prioridade (SLA em horas úteis)
 --    Conceitos: CASE WHEN, comparação entre tabelas, percentual
 -- ---------------------------------------------------------------------
 SELECT
     p.nome       AS prioridade,
     p.sla_horas  AS sla_horas,
     COUNT(*)     AS chamados_resolvidos,
-    SUM(CASE WHEN EXTRACT(EPOCH FROM (c.resolvido_em - c.aberto_em)) / 3600 <= p.sla_horas
+    SUM(CASE WHEN horas_uteis(c.aberto_em, c.resolvido_em) <= p.sla_horas
              THEN 1 ELSE 0 END) AS dentro_do_sla,
-    ROUND(100.0 * SUM(CASE WHEN EXTRACT(EPOCH FROM (c.resolvido_em - c.aberto_em)) / 3600 <= p.sla_horas
+    ROUND(100.0 * SUM(CASE WHEN horas_uteis(c.aberto_em, c.resolvido_em) <= p.sla_horas
                            THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_sla_cumprido
 FROM chamados c
 JOIN prioridades p ON p.id = c.prioridade_id
@@ -61,9 +65,9 @@ SELECT
     t.nome  AS tecnico,
     t.nivel,
     COUNT(c.id) AS chamados_atendidos,
-    ROUND(AVG(EXTRACT(EPOCH FROM (c.resolvido_em - c.aberto_em)) / 3600)::numeric, 1)
+    ROUND(AVG(horas_uteis(c.aberto_em, c.resolvido_em)), 1)
         AS horas_medias_resolucao,
-    ROUND(100.0 * SUM(CASE WHEN EXTRACT(EPOCH FROM (c.resolvido_em - c.aberto_em)) / 3600 <= p.sla_horas
+    ROUND(100.0 * SUM(CASE WHEN horas_uteis(c.aberto_em, c.resolvido_em) <= p.sla_horas
                            THEN 1 ELSE 0 END)
           / NULLIF(COUNT(c.resolvido_em), 0), 1) AS pct_sla_cumprido
 FROM tecnicos t
@@ -123,17 +127,17 @@ ORDER BY total_chamados DESC;
 
 
 -- ---------------------------------------------------------------------
--- 8) Chamados em aberto: já estouraram o SLA?
---    Conceitos: filtro por status, now(), intervalos de tempo
+-- 8) Chamados em aberto: já estouraram o SLA? (horas úteis desde a abertura)
+--    Conceitos: filtro por status, now(), função horas_uteis()
 -- ---------------------------------------------------------------------
 SELECT
     c.id,
     c.titulo,
     p.nome  AS prioridade,
     s.nome  AS status,
-    ROUND((EXTRACT(EPOCH FROM (now() - c.aberto_em)) / 3600)::numeric, 1) AS horas_em_aberto,
+    ROUND(horas_uteis(c.aberto_em, now()), 1) AS horas_em_aberto,
     p.sla_horas,
-    CASE WHEN EXTRACT(EPOCH FROM (now() - c.aberto_em)) / 3600 > p.sla_horas
+    CASE WHEN horas_uteis(c.aberto_em, now()) > p.sla_horas
          THEN 'SLA estourado' ELSE 'No prazo' END AS situacao_sla
 FROM chamados c
 JOIN prioridades p     ON p.id = c.prioridade_id
@@ -158,7 +162,7 @@ WITH eventos AS (
 )
 SELECT
     COUNT(*) AS vezes_aguardando,
-    ROUND(AVG(EXTRACT(EPOCH FROM (saida_do_status - alterado_em)) / 3600)::numeric, 1)
+    ROUND(AVG(horas_uteis(alterado_em, saida_do_status)), 1)
         AS horas_medias_espera
 FROM eventos
 WHERE status = 'Aguardando usuário'

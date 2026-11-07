@@ -3,8 +3,8 @@ Service Desk Analytics | Etapa 2: geração de dados sintéticos
 
 Gera usuários, técnicos, chamados e histórico de status e grava no PostgreSQL.
 Os dados são FICTÍCIOS (biblioteca Faker) e seguem regras que imitam um
-service desk real: prioridades, SLAs, horário comercial e descumprimento
-ocasional de prazo.
+service desk real: prioridades, SLAs medidos em horas úteis (seg a sex,
+8h às 18h) e descumprimento ocasional de prazo.
 
 Pode ser executado várias vezes: a cada execução, as tabelas de pessoas e
 chamados são limpas e recriadas.
@@ -26,7 +26,12 @@ from faker import Faker
 QTD_USUARIOS = 120
 QTD_CHAMADOS = 5000
 DIAS_DE_HISTORICO = 365
-SEMENTE = 42  # mesma semente = mesmos dados; facilita reproduzir o projeto
+SEMENTE = 42 
+
+# Janela de atendimento: segunda a sexta, das 8h às 18h.
+# O tempo de resolução (e o SLA) conta apenas as horas dentro dessa janela.
+HORA_INICIO_EXPEDIENTE = 8
+HORA_FIM_EXPEDIENTE = 18
 
 FUSO = ZoneInfo("America/Sao_Paulo")
 AGORA = datetime.now(FUSO)
@@ -35,7 +40,7 @@ random.seed(SEMENTE)
 Faker.seed(SEMENTE)
 fake = Faker("pt_BR")
 
-# Nomes de técnicos (fictícios) e seus níveis
+# Nomes de técnicos 
 TECNICOS = [
     ("Carlos Mendes", "N1"),
     ("Juliana Rocha", "N1"),
@@ -98,7 +103,7 @@ TITULOS = {
     ],
 }
 
-# Frequência relativa de cada categoria (
+# Frequência relativa de cada categoria
 PESO_CATEGORIAS = {
     "Senha e acesso": 28,
     "Hardware": 14,
@@ -110,7 +115,7 @@ PESO_CATEGORIAS = {
     "Outros": 3,
 }
 
-# Frequência relativa de cada prioridade 
+# Frequência relativa de cada prioridade
 PESO_PRIORIDADES = {"Crítica": 4, "Alta": 16, "Média": 55, "Baixa": 25}
 
 # Categorias mais demoradas ou mais rápidas de resolver
@@ -171,6 +176,7 @@ def sortear_abertura():
     while True:
         dia = AGORA - timedelta(days=random.uniform(0, DIAS_DE_HISTORICO))
         eh_fim_de_semana = dia.weekday() >= 5
+        # Fim de semana existe, mas é raro: só 8% das tentativas passam
         if eh_fim_de_semana and random.random() > 0.08:
             continue
         hora = random.choices(
@@ -187,9 +193,45 @@ def sortear_abertura():
             return abertura
 
 
+def proximo_expediente(momento):
+    """
+    Devolve o momento em que o atendimento está disponível:
+    - dentro do expediente (seg a sex, 8h às 18h): o próprio momento;
+    - antes das 8h num dia útil: as 8h do mesmo dia;
+    - depois das 18h, sábado ou domingo: as 8h do próximo dia útil.
+    """
+    while True:
+        if momento.weekday() >= 5 or momento.hour >= HORA_FIM_EXPEDIENTE:
+            momento = (momento + timedelta(days=1)).replace(
+                hour=HORA_INICIO_EXPEDIENTE, minute=0, second=0, microsecond=0
+            )
+        elif momento.hour < HORA_INICIO_EXPEDIENTE:
+            return momento.replace(
+                hour=HORA_INICIO_EXPEDIENTE, minute=0, second=0, microsecond=0
+            )
+        else:
+            return momento
+
+
+def somar_horas_uteis(inicio, horas):
+    """
+    Soma 'horas' ao momento 'inicio' contando apenas o horário comercial.
+    Ex.: 16h de sexta + 4 horas = 10h de segunda (2h na sexta + 2h na segunda).
+    """
+    momento = proximo_expediente(inicio)
+    restante = horas
+    while True:
+        fim_do_dia = momento.replace(hour=HORA_FIM_EXPEDIENTE, minute=0, second=0, microsecond=0)
+        disponivel = (fim_do_dia - momento).total_seconds() / 3600
+        if restante <= disponivel:
+            return momento + timedelta(hours=restante)
+        restante -= disponivel
+        momento = proximo_expediente(fim_do_dia)
+
+
 def sortear_horas_de_resolucao(sla_horas, categoria):
     """
-    Define quantas horas o chamado levou para ser resolvido.
+    Define quantas HORAS ÚTEIS o chamado levou para ser resolvido.
     O tempo gira em torno de metade do SLA, ajustado pela categoria.
     A distribuição lognormal gera um "rabo" de casos demorados, e cerca de
     15% a 25% dos chamados acabam estourando o prazo, como na vida real.
@@ -241,6 +283,7 @@ def gerar_tecnicos(cursor):
 def montar_chamados(usuarios_ids, tecnicos, categorias, prioridades, status):
     """
     Monta em memória os chamados e o histórico de cada um.
+    Todas as datas de atendimento respeitam o horário comercial.
     Devolve duas listas: chamados e historicos (ligados pela posição do chamado).
     """
     tecnicos_n1 = [t_id for t_id, nivel in tecnicos if nivel == "N1"]
@@ -267,39 +310,38 @@ def montar_chamados(usuarios_ids, tecnicos, categorias, prioridades, status):
             tecnico_id = random.choice(tecnicos_n1)
 
         aberto_em = sortear_abertura()
-        resolvido_potencial = aberto_em + timedelta(
-            hours=sortear_horas_de_resolucao(sla_horas, categoria)
-        )
+
+        # Tudo é calculado em HORAS ÚTEIS e depois convertido em datas reais
+        horas_resolucao = sortear_horas_de_resolucao(sla_horas, categoria)
+        horas_ate_iniciar = min(random.uniform(2, 90) / 60, horas_resolucao / 2)
+
+        inicio_atendimento = somar_horas_uteis(aberto_em, horas_ate_iniciar)
+        resolvido_potencial = somar_horas_uteis(aberto_em, horas_resolucao)
 
         titulo = random.choice(TITULOS[categoria])
         descricao = f"{titulo}. {fake.sentence(nb_words=12)}"
 
         historico = []  # (status_ant, status_novo, tecnico, comentario, data)
-        inicio_atendimento = aberto_em + timedelta(minutes=random.randint(2, 90))
 
         if resolvido_potencial <= AGORA:
             # Chamado já resolvido
             resolvido_em = resolvido_potencial
-            inicio_atendimento = min(inicio_atendimento, resolvido_em - timedelta(minutes=1))
-            if inicio_atendimento < aberto_em:
-                inicio_atendimento = aberto_em
-
             historico.append((None, "Aberto", None, "Chamado aberto", aberto_em))
             historico.append(("Aberto", "Em atendimento", tecnico_id, "Atendimento iniciado", inicio_atendimento))
 
             # 25% dos chamados ficam um tempo aguardando retorno do usuário
-            if (resolvido_em - inicio_atendimento) > timedelta(hours=1) and random.random() < 0.25:
-                espera_ini = inicio_atendimento + (resolvido_em - inicio_atendimento) * 0.3
-                espera_fim = inicio_atendimento + (resolvido_em - inicio_atendimento) * 0.6
+            horas_restantes = horas_resolucao - horas_ate_iniciar
+            if horas_restantes > 1 and random.random() < 0.25:
+                espera_ini = somar_horas_uteis(inicio_atendimento, horas_restantes * 0.3)
+                espera_fim = somar_horas_uteis(inicio_atendimento, horas_restantes * 0.6)
                 historico.append(("Em atendimento", "Aguardando usuário", tecnico_id, "Aguardando retorno do usuário", espera_ini))
                 historico.append(("Aguardando usuário", "Em atendimento", tecnico_id, "Usuário respondeu", espera_fim))
 
-            ultimo = "Em atendimento"
-            historico.append((ultimo, "Resolvido", tecnico_id, "Problema resolvido", resolvido_em))
+            historico.append(("Em atendimento", "Resolvido", tecnico_id, "Problema resolvido", resolvido_em))
             status_final = "Resolvido"
 
             # 80% dos resolvidos já foram fechados (se o fechamento já aconteceu)
-            fechamento = resolvido_em + timedelta(hours=random.randint(2, 48))
+            fechamento = somar_horas_uteis(resolvido_em, random.randint(2, 24))
             if random.random() < 0.8 and fechamento <= AGORA:
                 historico.append(("Resolvido", "Fechado", tecnico_id, "Chamado encerrado", fechamento))
                 status_final = "Fechado"
@@ -308,13 +350,14 @@ def montar_chamados(usuarios_ids, tecnicos, categorias, prioridades, status):
             resolvido_em = None
             historico.append((None, "Aberto", None, "Chamado aberto", aberto_em))
             sorteio = random.random()
-            if aberto_em + timedelta(minutes=30) > AGORA or sorteio < 0.15:
+            if inicio_atendimento > AGORA or sorteio < 0.15:
                 status_final = "Aberto"
                 tecnico_id = None
             else:
-                historico.append(("Aberto", "Em atendimento", tecnico_id, "Atendimento iniciado", min(inicio_atendimento, AGORA)))
-                if sorteio < 0.40:
-                    historico.append(("Em atendimento", "Aguardando usuário", tecnico_id, "Aguardando retorno do usuário", min(inicio_atendimento + timedelta(hours=2), AGORA)))
+                historico.append(("Aberto", "Em atendimento", tecnico_id, "Atendimento iniciado", inicio_atendimento))
+                espera = somar_horas_uteis(inicio_atendimento, 2)
+                if sorteio < 0.40 and espera <= AGORA:
+                    historico.append(("Em atendimento", "Aguardando usuário", tecnico_id, "Aguardando retorno do usuário", espera))
                     status_final = "Aguardando usuário"
                 else:
                     status_final = "Em atendimento"
